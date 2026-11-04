@@ -1,4 +1,4 @@
-"""数据读取层：把 Excel 各 sheet 读成 DataFrame。"""
+"""数据读取层：只读取输入表，不读取任何预先算好的结果表。"""
 
 from pathlib import Path
 from typing import Dict, Optional
@@ -6,6 +6,10 @@ from typing import Dict, Optional
 import pandas as pd
 
 from . import config
+
+
+class DataSchemaError(ValueError):
+    """输入文件缺少必需 sheet 或必需字段。"""
 
 
 def resolve_data_path(path: Optional[Path] = None) -> Path:
@@ -27,32 +31,55 @@ def resolve_data_path(path: Optional[Path] = None) -> Path:
 
 
 def read_sheet(path: Path, sheet_name: str) -> pd.DataFrame:
-    """读取单个 sheet，去掉全空行。"""
+    """读取单个 sheet，去空行、去重表头、列名去空格。"""
     df = pd.read_excel(path, sheet_name=sheet_name, engine="openpyxl")
     df = df.dropna(how="all")
+    df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def load_all(path: Optional[Path] = None) -> Dict[str, pd.DataFrame]:
-    """读取全部业务 sheet，返回 {sheet 名: DataFrame}。"""
+    """读取输入表。
+
+    必需：购买记录、商品原料信息、日期维度表
+    可选：原材料信息、原料实际消耗、原料采购记录
+    """
     data_path = resolve_data_path(path)
     xls = pd.ExcelFile(data_path, engine="openpyxl")
     available = set(xls.sheet_names)
 
+    missing = [name for name in config.REQUIRED_SHEETS if name not in available]
+    if missing:
+        raise DataSchemaError(
+            f"缺少必需 sheet：{'、'.join(missing)}。"
+            f"当前文件包含：{'、'.join(xls.sheet_names)}"
+        )
+
     frames: Dict[str, pd.DataFrame] = {}
-    for name in config.BUSINESS_SHEETS:
-        if name in available:
-            frames[name] = read_sheet(data_path, name)
-        else:
-            frames[name] = pd.DataFrame()
+    for name in config.REQUIRED_SHEETS + config.OPTIONAL_SHEETS:
+        frames[name] = read_sheet(data_path, name) if name in available else pd.DataFrame()
+
+    missing_cols = [
+        col for col in config.PURCHASE_REQUIRED_COLUMNS
+        if col not in frames[config.SHEET_PURCHASE].columns
+    ]
+    if missing_cols:
+        raise DataSchemaError(
+            f"「{config.SHEET_PURCHASE}」缺少必需字段：{'、'.join(missing_cols)}"
+        )
+
+    ignored = [name for name in xls.sheet_names if name in config.IGNORED_SHEETS]
     frames["_source"] = pd.DataFrame({"file": [str(data_path)]})
+    frames["_ignored"] = pd.DataFrame({"sheet": ignored})
     return frames
 
 
 if __name__ == "__main__":
     data = load_all()
     print(f"数据源：{data['_source'].iloc[0, 0]}")
+    if not data["_ignored"].empty:
+        print(f"已忽略：{'、'.join(data['_ignored']['sheet'])}")
     for name, df in data.items():
         if name.startswith("_"):
             continue
-        print(f"{name}: {len(df)} 行 x {len(df.columns)} 列")
+        print(f"{name}: {len(df)} 行 x {len(df.columns)} 列" if not df.empty else f"{name}: （无）")
