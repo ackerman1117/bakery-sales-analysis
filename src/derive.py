@@ -162,9 +162,9 @@ def material_consumption_daily(purchases: pd.DataFrame,
     if sales_daily.empty:
         return pd.DataFrame()
 
-    cols = present_columns(sales_daily, ["日期"] + DATE_ATTRS + ["商品编号", "销量"])
-    bom_cols = ["商品编号", "原材料", "基准单位", "单件基准用量"]
-    detail = sales_daily[cols].merge(bom[bom_cols], on="商品编号", how="inner")
+    cols = present_columns(sales_daily, ["日期"] + DATE_ATTRS + ["商品名称", "销量"])
+    bom_cols = ["商品名称", "原材料", "基准单位", "单件基准用量"]
+    detail = sales_daily[cols].merge(bom[bom_cols], on="商品名称", how="inner")
     if detail.empty:
         return pd.DataFrame()
 

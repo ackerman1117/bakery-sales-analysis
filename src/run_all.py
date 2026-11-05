@@ -39,6 +39,7 @@ def build_results(frames: dict) -> dict:
     bom = frames.get(config.SHEET_BOM, pd.DataFrame())
     material = frames.get(config.SHEET_MATERIAL, pd.DataFrame())
     actual = frames.get(config.SHEET_ACTUAL_CONSUMPTION, pd.DataFrame())
+    product_info = frames.get(config.SHEET_PRODUCT_INFO, pd.DataFrame())
 
     # 1. 基础派生：全部来自购买记录
     sales_daily = derive.daily_product_sales(purchases)
@@ -57,6 +58,8 @@ def build_results(frames: dict) -> dict:
     actual_cmp = analysis.actual_vs_theoretical(consumption_daily, actual)
 
     return {
+        "商品信息": product_info[["商品编号", "商品名称", "口味风格", "口味", "商品类别"]]
+        if not product_info.empty else product_info,
         "销售概览": analysis.sales_kpis(purchases, sales_daily),
         "单日产品销售量": sales_daily,
         "产品偏好": product_pref,

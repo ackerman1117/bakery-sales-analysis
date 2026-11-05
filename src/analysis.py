@@ -329,6 +329,8 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
     dim = frames.get(cfg.SHEET_DATE_DIM, pd.DataFrame())
     material = frames.get(cfg.SHEET_MATERIAL, pd.DataFrame())
     actual = frames.get(cfg.SHEET_ACTUAL_CONSUMPTION, pd.DataFrame())
+    product_info = frames.get(cfg.SHEET_PRODUCT_INFO, pd.DataFrame())
+    name_audit = frames.get("_名称审计", pd.DataFrame())
 
     checks = []
 
@@ -339,7 +341,9 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
     add("日期缺失", f"{int(purchases['日期'].isna().sum())} 行", purchases["日期"].isna().sum() == 0)
     add("时间缺失（不计入客流）", f"{int(purchases['小时'].isna().sum())} 行",
         purchases["小时"].isna().sum() == 0)
-    add("商品编号缺失", f"{int(purchases['商品编号'].isna().sum())} 行",
+    add("商品名称缺失", f"{int(purchases['商品名称'].isna().sum())} 行",
+        purchases["商品名称"].isna().sum() == 0)
+    add("商品编号生成缺失", f"{int(purchases['商品编号'].isna().sum())} 行",
         purchases["商品编号"].isna().sum() == 0)
     add("数量 ≤ 0", f"{int((purchases['数量'] <= 0).sum())} 行",
         (purchases["数量"] <= 0).sum() == 0)
@@ -349,17 +353,37 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
     dup = purchases.duplicated().sum()
     add("完全重复明细", f"{int(dup)} 行", dup == 0)
 
-    unknown_products = sorted(
-        set(purchases["商品编号"].dropna().astype(int)) - set(bom["商品编号"].dropna().astype(int))
-    ) if not bom.empty else []
-    add("购买商品未在 BOM 中", f"{len(unknown_products)} 个：{unknown_products or '无'}",
+    # 名称归一歧义：同一个匹配键对应多种原始写法时列出，便于人工确认。
+    ambiguous = []
+    if not name_audit.empty:
+        variants = name_audit.groupby("名称键")["商品名称"].nunique()
+        for key, count in variants[variants > 1].items():
+            names = sorted(name_audit.loc[name_audit["名称键"] == key, "商品名称"].unique())
+            ambiguous.append(f"{key}→{'/'.join(names)}")
+    add("商品名称归一后重名歧义",
+        f"{len(ambiguous)} 个：{ambiguous or '无'}", len(ambiguous) == 0)
+
+    # 商品信息是否覆盖购买记录 + BOM 的商品全集，且编号唯一。
+    all_keys = set(purchases["名称键"].dropna()) | set(bom["名称键"].dropna())
+    info_keys = set(product_info["名称键"].dropna()) if not product_info.empty else set()
+    uncovered = sorted(all_keys - info_keys)
+    add("商品信息覆盖全部商品",
+        f"{len(product_info)} 个商品；未覆盖 {len(uncovered)} 个：{uncovered or '无'}",
+        len(uncovered) == 0)
+    duplicated_ids = (int(product_info["商品编号"].duplicated().sum())
+                      if not product_info.empty else 0)
+    add("商品信息编号唯一", f"{duplicated_ids} 个重复编号", duplicated_ids == 0)
+
+    sold_names = set(purchases["商品名称"].dropna())
+    bom_names = set(bom["商品名称"].dropna())
+    unknown_products = sorted(sold_names - bom_names) if not bom.empty else sorted(sold_names)
+    add("购买商品未在 BOM 中",
+        f"{len(unknown_products)} 个：{unknown_products or '无'}（缺失商品请在「商品原料信息」补 BOM）",
         len(unknown_products) == 0)
 
     if not bom.empty and not purchases.empty:
-        sold = set(purchases["商品编号"].dropna().astype(int))
-        bom_products = set(bom["商品编号"].dropna().astype(int))
-        not_sold = sorted(bom_products - sold)
-        add("BOM 商品无销售记录", f"{len(not_sold)} 个：{not_sold or '无'}", True)
+        not_sold = sorted(bom_names - sold_names)
+        add("BOM 商品无销售记录", f"{len(not_sold)} 个：{not_sold or '无'}", len(not_sold) == 0)
 
     if not material.empty:
         missing_mat = sorted(set(bom["原材料"].dropna()) - set(material["原料名称"].dropna()))
@@ -377,7 +401,7 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
         add("单日销量计算", f"{sales_daily['日期'].nunique()} 天 / {sales_daily['商品编号'].nunique()} 个商品", True)
 
     if consumption_daily.empty:
-        add("原料理论消耗计算", "无结果，请检查 BOM 商品编号是否能匹配", False)
+        add("原料理论消耗计算", "无结果，请检查 BOM 商品名称是否能匹配", False)
     else:
         add("原料理论消耗计算", f"{consumption_daily['原料名称'].nunique()} 种原料", True)
 
