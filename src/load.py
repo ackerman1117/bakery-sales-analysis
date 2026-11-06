@@ -76,7 +76,8 @@ def load_all(path: Optional[Path] = None) -> Dict[str, pd.DataFrame]:
     if missing_bom_cols:
         raise DataSchemaError(
             f"「{config.SHEET_BOM}」缺少必需字段：{'、'.join(missing_bom_cols)}。"
-            "BOM 只需商品名称 + 原材料 + 用量，商品编号/口味由程序生成。"
+            "BOM 需要商品名称 + 原材料 + 用量 + 口味；口味是商品级属性，"
+            "同一商品所有 BOM 行填同一个值（甜 / 咸 / 辣 / 原味），商品编号由程序生成。"
         )
 
     ignored = [name for name in xls.sheet_names if name in config.IGNORED_SHEETS]

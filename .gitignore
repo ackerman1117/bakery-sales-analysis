@@ -16,7 +16,7 @@ data/raw/*
 !data/raw/.gitkeep
 *.xlsx
 !data/sample/sample_food.xlsx
-!data/sample/*.xlsx
+data/sample/*.xlsx
 
 # ---- 输出产物 ----
 outputs/tables/*.csv

@@ -331,6 +331,7 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
     actual = frames.get(cfg.SHEET_ACTUAL_CONSUMPTION, pd.DataFrame())
     product_info = frames.get(cfg.SHEET_PRODUCT_INFO, pd.DataFrame())
     name_audit = frames.get("_名称审计", pd.DataFrame())
+    bom_taste = frames.get("_BOM口味审计", pd.DataFrame())
 
     checks = []
 
@@ -374,6 +375,15 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
                       if not product_info.empty else 0)
     add("商品信息编号唯一", f"{duplicated_ids} 个重复编号", duplicated_ids == 0)
 
+    # 口味完整性：每个商品都应从 BOM 拿到 甜/咸/辣/原味 之一，不推断、不默认甜。
+    if not product_info.empty:
+        missing_product_taste = sorted(
+            product_info.loc[product_info["口味风格"].isna(), "商品名称"].dropna())
+        add("商品口味缺失",
+            f"{len(missing_product_taste)} 个：{missing_product_taste or '无'}"
+            "（请在该商品的 BOM 行填写口味）",
+            len(missing_product_taste) == 0)
+
     sold_names = set(purchases["商品名称"].dropna())
     bom_names = set(bom["商品名称"].dropna())
     unknown_products = sorted(sold_names - bom_names) if not bom.empty else sorted(sold_names)
@@ -389,6 +399,32 @@ def validate_inputs(frames: dict, sales_daily: pd.DataFrame,
         missing_mat = sorted(set(bom["原材料"].dropna()) - set(material["原料名称"].dropna()))
         add("BOM 原料不在原材料信息", f"{len(missing_mat)} 个：{missing_mat or '无'}",
             len(missing_mat) == 0)
+
+    # BOM 口味：缺失 / 取值非法 / 同一商品多行口味冲突。
+    if not bom_taste.empty:
+        missing_rows = bom_taste[bom_taste["口味编码"].isna() & bom_taste["口味"].isna()]
+        invalid_rows = bom_taste[bom_taste["口味编码"].isna() & bom_taste["口味"].notna()]
+        missing_products = sorted(missing_rows["商品名称"].dropna().unique())
+        invalid_detail = sorted(
+            f"{p}/{m}→{v}" for p, m, v in
+            zip(invalid_rows["商品名称"], invalid_rows["原材料"], invalid_rows["口味"])
+            if pd.notna(p)
+        )
+        conflicts = []
+        for name, group in bom_taste.dropna(subset=["口味编码"]).groupby("商品名称"):
+            codes = sorted({int(c) for c in group["口味编码"]})
+            if len(codes) > 1:
+                conflicts.append(
+                    f"{name}：{'/'.join(cfg.TASTE_MAP.get(c, str(c)) for c in codes)}")
+        add("BOM 口味缺失",
+            f"{len(missing_rows)} 行 / 涉及 {len(missing_products)} 个商品："
+            f"{missing_products or '无'}（请在「商品原料信息」补口味）",
+            len(missing_rows) == 0)
+        add("BOM 口味非法",
+            f"{len(invalid_detail)} 个：{invalid_detail or '无'}（只允许 甜/咸/辣/原味）",
+            len(invalid_detail) == 0)
+        add("同商品口味冲突",
+            f"{len(conflicts)} 个：{conflicts or '无'}", len(conflicts) == 0)
 
     if not dim.empty and not purchases.empty:
         out_of_dim = purchases[(purchases["日期"].notna()) &

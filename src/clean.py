@@ -169,6 +169,17 @@ def normalize_bom(bom: pd.DataFrame, material: pd.DataFrame) -> pd.DataFrame:
     out["商品名称"] = out["商品名称"].map(canonical_product_name)
     out["名称键"] = out["商品名称"].map(product_name_key)
     out["原材料"] = out["原材料"].map(canonical_product_name)
+    # 口味是商品级属性：同一商品所有 BOM 行应为同一个值；非法/缺失留空供校验。
+    if config.BOM_TASTE_COLUMN in out.columns:
+        out[config.BOM_TASTE_COLUMN] = out[config.BOM_TASTE_COLUMN].map(
+            canonical_product_name)
+    else:
+        out[config.BOM_TASTE_COLUMN] = pd.NA
+    out["口味编码"] = pd.to_numeric(
+        out[config.BOM_TASTE_COLUMN].map(
+            lambda v: config.BOM_TASTE_MAP.get(v) if isinstance(v, str) else None),
+        errors="coerce",
+    ).astype("Int64")
     out = infer_bom_unit(out, material)
     return out.dropna(subset=["商品名称", "原材料", "重量"]).reset_index(drop=True)
 
@@ -233,14 +244,32 @@ def _infer_category(name: str) -> str:
     return config.DEFAULT_CATEGORY
 
 
-def _infer_taste(name: str, key: str) -> int:
-    """口味推断：显式覆盖表 → 咸味关键词 → 默认甜味。"""
-    overrides = {product_name_key(k): v for k, v in config.TASTE_OVERRIDES.items()}
-    if key in overrides:
-        return int(overrides[key])
-    if any(keyword in name for keyword in config.TASTE_SAVORY_KEYWORDS):
-        return 2
-    return int(config.DEFAULT_TASTE)
+def _bom_taste_map(bom: pd.DataFrame) -> Dict[str, int]:
+    """商品名称 → 口味编码，直接取「商品原料信息」的口味列。
+
+    同一商品的所有 BOM 行必须填同一个口味；不一致时直接报错并列出冲突值。
+    BOM 缺失口味或商品没有 BOM 时返回空（外层记为“未标注”，由数据校验告警）。
+    """
+    if bom.empty or "口味编码" not in bom.columns:
+        return {}
+
+    conflicts = []
+    taste = {}
+    for name, group in bom.groupby("商品名称", dropna=False):
+        codes = sorted({int(code) for code in group["口味编码"].dropna()})
+        if len(codes) > 1:
+            labels = "/".join(config.TASTE_MAP.get(code, str(code)) for code in codes)
+            conflicts.append(f"{name}（{labels}）")
+            continue
+        taste[str(name)] = codes[0] if codes else pd.NA
+
+    if conflicts:
+        raise DataSchemaError(
+            f"以下商品的 BOM 行口味不一致：{'；'.join(sorted(conflicts))}。"
+            f"同一商品的所有 BOM 行必须填同一个口味（甜 / 咸 / 辣 / 原味），"
+            f"请在「{config.SHEET_BOM}」中统一后重跑。"
+        )
+    return taste
 
 
 def build_product_info(purchases: pd.DataFrame, bom: pd.DataFrame) -> pd.DataFrame:
@@ -249,6 +278,8 @@ def build_product_info(purchases: pd.DataFrame, bom: pd.DataFrame) -> pd.DataFra
     编号规则：
     1) config.LEGACY_PRODUCT_IDS 中的商品固定为 1-5，兼容旧「产品生产」表；
     2) 其余商品按（类别优先级, 名称）排序后从 6 开始编号，跳过已占用编号。
+    口味规则：直接取「商品原料信息」的口味列（同一商品所有 BOM 行必须一致）；
+    没有 BOM 或 BOM 未标口味的商品记为“未标注”，不推断、不默认甜。
     同一输入多次运行结果完全一致；新增商品会自动进入映射。
     """
     parts = []
@@ -271,7 +302,8 @@ def build_product_info(purchases: pd.DataFrame, bom: pd.DataFrame) -> pd.DataFra
     legacy = {product_name_key(name): int(pid)
               for name, pid in config.LEGACY_PRODUCT_IDS.items()}
     category = {key: _infer_category(str(name)) for key, name in display.items()}
-    taste = {key: _infer_taste(str(name), key) for key, name in display.items()}
+    bom_taste = _bom_taste_map(bom)
+    taste = {key: bom_taste.get(str(display[key]), pd.NA) for key in display.index}
     category_rank = {name: i for i, name in enumerate(config.CATEGORY_ORDER)}
 
     ids = {}
@@ -290,11 +322,12 @@ def build_product_info(purchases: pd.DataFrame, bom: pd.DataFrame) -> pd.DataFra
         used.add(next_id)
         next_id += 1
 
+    taste_codes = [taste[key] for key in display.index]
     info = pd.DataFrame({
         "商品编号": [ids[key] for key in display.index],
         "商品名称": [display[key] for key in display.index],
-        "口味风格": [taste[key] for key in display.index],
-        "口味": [config.TASTE_MAP.get(taste[key], "未知") for key in display.index],
+        "口味风格": pd.array(taste_codes, dtype="Int64"),
+        "口味": [config.TASTE_MAP[int(c)] if pd.notna(c) else "未标注" for c in taste_codes],
         "商品类别": [category[key] for key in display.index],
         "名称键": list(display.index),
     }, columns=columns)
@@ -347,7 +380,7 @@ def apply_product_info(df: pd.DataFrame, product_info: pd.DataFrame,
             f"「{config.SHEET_BOM}」中补充该商品名称的同名原料配方。"
         )
 
-    out = df.drop(columns=["商品名称"], errors="ignore").merge(
+    out = df.drop(columns=["商品名称", "口味", "口味编码"], errors="ignore").merge(
         mapping, on="名称键", how="left"
     )
     return out
@@ -361,7 +394,9 @@ def clean_all(frames: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     bom = normalize_bom(frames.get(config.SHEET_BOM, pd.DataFrame()), material)
     purchases = normalize_purchases(frames.get(config.SHEET_PURCHASE, pd.DataFrame()))
 
-    # 先由「购买记录 + BOM」生成商品信息，再按名称回填编号/口味/类别。
+    # 先由「购买记录 + BOM 口味」生成商品信息，再按名称回填编号/口味/类别。
+    # 口味审计保留 BOM 原始口味与编码，用于数据校验（缺失/非法/冲突）。
+    bom_taste_audit = bom[["商品名称", "原材料", "口味", "口味编码"]].copy()
     product_info = build_product_info(purchases, bom)
     name_audit = build_name_audit(purchases, bom)
     purchases = apply_product_info(purchases, product_info, config.SHEET_PURCHASE)
@@ -374,6 +409,7 @@ def clean_all(frames: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
     out[config.SHEET_PURCHASE] = purchases.drop(columns=["_原始商品名称"], errors="ignore")
     out[config.SHEET_PRODUCT_INFO] = product_info
     out["_名称审计"] = name_audit
+    out["_BOM口味审计"] = bom_taste_audit
     out[config.SHEET_ACTUAL_CONSUMPTION] = normalize_actual_consumption(
         frames.get(config.SHEET_ACTUAL_CONSUMPTION, pd.DataFrame())
     )
